@@ -640,4 +640,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if os.environ.get("G1_LINGBOT_FORCE_EXIT", "1") != "0":
+        os._exit(exit_code)
+    raise SystemExit(exit_code)
