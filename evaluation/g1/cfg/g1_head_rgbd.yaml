@@ -1,0 +1,46 @@
+# G1 head RGB-D camera config for HumanEgo inference.
+# This is the planned config path for the G1 camera adapter. The current
+# repository does not yet include the adapter implementation.
+
+type: "g1_cosine_rgbd"
+sdk_driver: "a2d_sdk.robot.CosineCamera"
+
+cameras:
+  rgb_name: "head"
+  depth_name: "head_depth"
+  parameter_camera_name: "head"
+
+parameters:
+  loader_module: "G1/parameter.py"
+  archive_path: "G1/parameters.zip"
+  intrinsics_json: "parameters/head_intrinsic_params.json"
+  extrinsics_json: "parameters/head_extrinsic_params.json"
+
+sync:
+  reference: "head"
+  method: "get_image_nearest"
+  fallback_method: "get_latest_image"
+  max_delta_ns: 50000000
+
+runtime:
+  warmup_s: 2.0
+  frame_tries: 30
+  frame_sleep_s: 0.1
+
+format:
+  sdk_color_order: "RGB"
+  frame_color_order: "BGR"
+  sdk_depth_dtype: "uint16"
+  sdk_depth_unit: "mm"
+  frame_depth_dtype: "float32"
+  frame_depth_unit: "m"
+
+resize:
+  enabled: false
+  target_width: null
+  target_height: null
+
+validation:
+  save_debug_frames: true
+  depth_min_m: 0.15
+  depth_max_m: 2.50

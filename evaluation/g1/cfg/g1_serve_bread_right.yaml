@@ -1,0 +1,104 @@
+# HumanEgo serve_bread on Agibot G1, single right hand.
+# FK/control are intentionally not enabled here yet.
+
+policy:
+  ckpt: "/data/wangk/checkpoints/humanego/serve_bread/HumanEgo/latest.pt"
+  num_inference_steps: 20
+
+control:
+  control_hz: 10.0
+  exec_horizon: 8
+  done_threshold: 0.80
+  alpha_pos: 0.50
+  alpha_rot: 0.50
+  max_pos_step: 0.03
+  grasp_threshold: 0.50
+  safe_z_min: -0.12
+  dry_run: true
+
+perception:
+  anchor_key: "obj1"
+  n_init_frames: 10
+  # First robot dry-run uses fixed camera-frame object poses so we can validate
+  # policy loading and G1 target conversion before enabling DINO-SAM.
+  object_source: "fixed"  # "fixed" for link tests, "rgbd" for real bread/plate poses on server.
+  allow_fixed_object_fallback: false
+  allow_non_anchor_object_fallback: true
+  dry_run_object_source: "fixed"
+  dry_run_object_poses_cam:
+    obj1:
+      name: "bread"
+      T_in_cam:
+        - [1.0, 0.0, 0.0, 0.00]
+        - [0.0, 1.0, 0.0, 0.00]
+        - [0.0, 0.0, 1.0, 0.65]
+        - [0.0, 0.0, 0.0, 1.0]
+    obj2:
+      name: "plate"
+      T_in_cam:
+        - [1.0, 0.0, 0.0, 0.08]
+        - [0.0, 1.0, 0.0, 0.02]
+        - [0.0, 0.0, 1.0, 0.70]
+        - [0.0, 0.0, 0.0, 1.0]
+  object_prompts:
+    obj1: "a bread ."
+    obj2: "a white plate ."
+  object_filters:
+    obj2:
+      # Plate is thin and compact. Use individual DINO/SAM candidates instead
+      # of the union mask, then reject table-sized or arm-connected masks.
+      use_dinosam_candidates: true
+      min_mask_pixels: 120
+      max_mask_pixels: 9000
+      target_mask_pixels: 1800
+      min_bbox_wh: [10, 10]
+      max_bbox_wh: [140, 120]
+      min_bbox_aspect: 0.45
+      max_bbox_aspect: 2.40
+      max_bbox_area_frac: 0.16
+      min_fill_ratio: 0.12
+      min_circularity: 0.04
+      plate_circle_fallback: true
+      plate_circle_min_radius_px: 14
+      plate_circle_max_radius_px: 45
+      plate_circle_target_radius_px: 27
+      plate_circle_param1: 80
+      plate_circle_param2: 16
+      plate_circle_min_edge_support: 0.015
+      plate_circle_min_disk_overlap: 0.20
+      plate_circle_min_score: 0.05
+      plate_circle_mask_scale: 1.08
+      max_raw_mask_pixels: 9000
+      min_valid_depth_pixels: 80
+      min_valid_depth_ratio: 0.75
+      max_depth_range_m: 0.30
+      max_extent_m: [0.35, 0.35, 0.25]
+  min_points: 30
+  mask_erode_px: 0
+  depth_window_px: 4
+  fallback_dilate_px: 4
+  fallback_depth_window_px: 8
+  erase_prompt: "a robot arm . a robot gripper ."
+  dinosam_cfg_path: "./cfg/preprocess/base/DINOSAM.yaml"
+  lama_cfg_path: "./cfg/preprocess/base/Lama.yaml"
+  visualkpts_cfg_path: "./cfg/preprocess/base/VisualKpts.yaml"
+
+camera:
+  cfg_path: "./evaluation/g1/cfg/g1_head_rgbd.yaml"
+
+robot:
+  sides: ["right"]
+  driver: "g1"
+  tcp_frame: "gripper_r_center_link"
+  sdk_link7_frame: "arm_right_link7"
+  fk_status: "corobot_fk_verified"
+  camera_extrinsic_semantics: "T_head_pitch_camera"
+  runtime_camera_transform: "T_base_camera = T_base_head_pitch(q) @ T_head_pitch_camera"
+  cfg_paths: {}
+  # T_align = T_hand_in_tcp. It maps G1 TCP/gripper-center frame to the
+  # HumanEgo/Aria right-hand midpoint frame used by serve_bread.
+  T_align:
+    - [-1.0,  0.0,  0.0,  0.0]
+    - [ 0.0,  0.0,  1.0,  0.0]
+    - [ 0.0,  1.0,  0.0,  0.0]
+    - [ 0.0,  0.0,  0.0,  1.0]
