@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import inspect
 import json
 import math
 import os
@@ -163,13 +164,15 @@ def connect_policy(host: str, port: int):
 
     uri = f"ws://{host}:{port}"
     log(f"connecting LingBot websocket server: {uri}")
-    ws = websockets.sync.client.connect(
-        uri,
-        compression=None,
-        max_size=None,
-        ping_interval=None,
-        close_timeout=10,
-    )
+    connect_kwargs = {
+        "compression": None,
+        "max_size": None,
+        "ping_interval": None,
+        "close_timeout": 10,
+    }
+    supported_kwargs = inspect.signature(websockets.sync.client.connect).parameters
+    connect_kwargs = {k: v for k, v in connect_kwargs.items() if k in supported_kwargs}
+    ws = websockets.sync.client.connect(uri, **connect_kwargs)
     metadata = unpackb(ws.recv())
     return ws, metadata
 
