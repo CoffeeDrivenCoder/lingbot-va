@@ -31,6 +31,7 @@ G1_ROOT = Path(__file__).resolve().parent
 LINGBOT_ROOT = G1_ROOT.parents[1]
 DEFAULT_CFG = G1_ROOT / "cfg" / "g1_serve_bread_right.yaml"
 DEFAULT_NORM_STATS = G1_ROOT / "meta" / "lingbot_action_norm_stats.json"
+DEFAULT_INITIAL_POSE_REFERENCE = G1_ROOT / "meta" / "initial_pose_reference.json"
 
 for path in (
     G1_ROOT,
@@ -117,6 +118,52 @@ def quat_xyzw_to_R(q: np.ndarray) -> np.ndarray:
         ],
         dtype=np.float64,
     )
+
+
+def R_to_quat_xyzw(R: np.ndarray) -> np.ndarray:
+    R = np.asarray(R, dtype=np.float64).reshape(3, 3)
+    trace = float(np.trace(R))
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        w = 0.25 * s
+        x = (R[2, 1] - R[1, 2]) / s
+        y = (R[0, 2] - R[2, 0]) / s
+        z = (R[1, 0] - R[0, 1]) / s
+    else:
+        diag = np.diag(R)
+        idx = int(np.argmax(diag))
+        if idx == 0:
+            s = math.sqrt(max(0.0, 1.0 + R[0, 0] - R[1, 1] - R[2, 2])) * 2.0
+            x = 0.25 * s
+            y = (R[0, 1] + R[1, 0]) / s
+            z = (R[0, 2] + R[2, 0]) / s
+            w = (R[2, 1] - R[1, 2]) / s
+        elif idx == 1:
+            s = math.sqrt(max(0.0, 1.0 + R[1, 1] - R[0, 0] - R[2, 2])) * 2.0
+            x = (R[0, 1] + R[1, 0]) / s
+            y = 0.25 * s
+            z = (R[1, 2] + R[2, 1]) / s
+            w = (R[0, 2] - R[2, 0]) / s
+        else:
+            s = math.sqrt(max(0.0, 1.0 + R[2, 2] - R[0, 0] - R[1, 1])) * 2.0
+            x = (R[0, 2] + R[2, 0]) / s
+            y = (R[1, 2] + R[2, 1]) / s
+            z = 0.25 * s
+            w = (R[1, 0] - R[0, 1]) / s
+    quat = np.asarray([x, y, z, w], dtype=np.float64)
+    norm = float(np.linalg.norm(quat))
+    if norm <= EPS:
+        return np.asarray([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+    return quat / norm
+
+
+def quat_angle_deg(q_current: np.ndarray, q_ref: np.ndarray) -> float:
+    q_current = np.asarray(q_current, dtype=np.float64).reshape(4)
+    q_ref = np.asarray(q_ref, dtype=np.float64).reshape(4)
+    q_current = q_current / max(float(np.linalg.norm(q_current)), EPS)
+    q_ref = q_ref / max(float(np.linalg.norm(q_ref)), EPS)
+    dot = abs(float(np.dot(q_current, q_ref)))
+    return float(np.degrees(2.0 * math.acos(np.clip(dot, -1.0, 1.0))))
 
 
 def T_from_xyzquat_xyzw(values: np.ndarray) -> np.ndarray:
@@ -513,6 +560,97 @@ def write_ik_joint_outputs(run_dir: Path, validation: dict[str, Any], side: str)
     return summary
 
 
+def current_hand_state_from_g1_state(state: dict[str, Any], cfg: dict[str, Any]) -> np.ndarray:
+    T_base_camera = np.asarray(state["T_base_camera"], dtype=np.float64).reshape(4, 4)
+    T_tcp_base = np.asarray(state["T_tcp_in_base"], dtype=np.float64).reshape(4, 4)
+    T_align = np.asarray(cfg["robot"]["T_align"], dtype=np.float64).reshape(4, 4)
+    T_hand_cam = np.linalg.inv(T_base_camera) @ T_tcp_base @ T_align
+    return np.asarray(
+        [
+            *T_hand_cam[:3, 3].tolist(),
+            *R_to_quat_xyzw(T_hand_cam[:3, :3]).tolist(),
+            float(state.get("gripper", 0.0)),
+        ],
+        dtype=np.float64,
+    )
+
+
+def nearest_pose_reference(current: np.ndarray, entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not entries:
+        return None
+    best = None
+    pos_distances = []
+    rot_distances = []
+    for entry in entries:
+        ref = np.asarray(entry["state"], dtype=np.float64)
+        pos_m = float(np.linalg.norm(current[:3] - ref[:3]))
+        rot_deg = quat_angle_deg(current[3:7], ref[3:7])
+        gripper_delta = float(abs(current[7] - ref[7]))
+        pos_distances.append(pos_m)
+        rot_distances.append(rot_deg)
+        score = pos_m + (rot_deg / 180.0) * 0.25 + gripper_delta * 0.05
+        candidate = {
+            "score": float(score),
+            "position_distance_m": pos_m,
+            "rotation_distance_deg": rot_deg,
+            "gripper_delta": gripper_delta,
+            "reference": {k: v for k, v in entry.items() if k != "state"},
+            "reference_state": ref.tolist(),
+        }
+        if best is None or candidate["score"] < best["score"]:
+            best = candidate
+    pos_arr = np.asarray(pos_distances, dtype=np.float64)
+    rot_arr = np.asarray(rot_distances, dtype=np.float64)
+    best["distance_quantiles"] = {
+        "position_m_p05_p50_p95": np.quantile(pos_arr, [0.05, 0.50, 0.95]).tolist(),
+        "rotation_deg_p05_p50_p95": np.quantile(rot_arr, [0.05, 0.50, 0.95]).tolist(),
+    }
+    return best
+
+
+def compare_initial_pose(
+    state: dict[str, Any],
+    cfg: dict[str, Any],
+    reference_path: Path,
+    episode_pos_tol_m: float,
+    segment_pos_tol_m: float,
+    rot_tol_deg: float,
+) -> dict[str, Any]:
+    if not reference_path.exists():
+        return {
+            "available": False,
+            "reason": f"initial pose reference not found: {reference_path}",
+        }
+    reference = json.loads(reference_path.read_text(encoding="utf-8"))
+    current = current_hand_state_from_g1_state(state, cfg)
+    episode_nearest = nearest_pose_reference(current, reference.get("episode_first_frames", []))
+    segment_nearest = nearest_pose_reference(current, reference.get("segment_start_frames", []))
+    episode_close = bool(
+        episode_nearest is not None
+        and episode_nearest["position_distance_m"] <= episode_pos_tol_m
+        and episode_nearest["rotation_distance_deg"] <= rot_tol_deg
+    )
+    segment_close = bool(
+        segment_nearest is not None
+        and segment_nearest["position_distance_m"] <= segment_pos_tol_m
+        and segment_nearest["rotation_distance_deg"] <= rot_tol_deg
+    )
+    return {
+        "available": True,
+        "reference_path": str(reference_path),
+        "current_hand_camera_state": current.tolist(),
+        "thresholds": {
+            "episode_start_position_tol_m": episode_pos_tol_m,
+            "segment_start_position_tol_m": segment_pos_tol_m,
+            "rotation_tol_deg": rot_tol_deg,
+        },
+        "episode_start_close": episode_close,
+        "segment_start_close": segment_close,
+        "nearest_episode_start": episode_nearest,
+        "nearest_segment_start": segment_nearest,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server-host", default="127.0.0.1")
@@ -530,6 +668,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--close-camera", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--close-arm", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--norm-stats", type=Path, default=DEFAULT_NORM_STATS)
+    parser.add_argument("--initial-pose-reference", type=Path, default=DEFAULT_INITIAL_POSE_REFERENCE)
+    parser.add_argument("--episode-start-pos-tol-m", type=float, default=0.20)
+    parser.add_argument("--segment-start-pos-tol-m", type=float, default=0.15)
+    parser.add_argument("--initial-start-rot-tol-deg", type=float, default=25.0)
     parser.add_argument("--train-range-margin", type=float, default=0.10)
     parser.add_argument("--arm-state-mapping", choices=["left_first", "right_first"], default="left_first")
     parser.add_argument("--urdf-zip", default=str(G1_ROOT / "G1" / "G1_URDF_Omnipicker.zip"))
@@ -596,6 +738,14 @@ def main() -> int:
     sequence, indices = flatten_action_for_execution(action, args.skip_first_latent)
     validation = validate_sequence(sequence, indices, state, cfg, args)
     joint_summary = write_ik_joint_outputs(run_dir, validation, args.side)
+    initial_pose_check = compare_initial_pose(
+        state,
+        cfg,
+        args.initial_pose_reference,
+        args.episode_start_pos_tol_m,
+        args.segment_start_pos_tol_m,
+        args.initial_start_rot_tol_deg,
+    )
     report = {
         "ok": bool(validation["summary"]["executable_candidate"]),
         "run_dir": str(run_dir),
@@ -612,6 +762,7 @@ def main() -> int:
         },
         "action_shape": list(action.shape),
         "skip_first_latent": bool(args.skip_first_latent),
+        "initial_pose_check": initial_pose_check,
         "joint_summary": joint_summary,
         "validation": validation,
     }
@@ -625,6 +776,7 @@ def main() -> int:
                 "ok": report["ok"],
                 "action_shape": report["action_shape"],
                 "summary": validation["summary"],
+                "initial_pose_check": initial_pose_check,
                 "joint_summary": joint_summary,
                 "run_dir": str(run_dir),
             },

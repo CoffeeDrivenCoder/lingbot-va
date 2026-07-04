@@ -39,10 +39,19 @@ Important files:
 ```text
 summary.json
 joint_summary.json
+initial_pose_check in summary.json
 ik_joint_trajectory.csv
 offline_policy_check_report.json
 input_state.json
 lingbot_ego_rgb_320x256.png
 g1_rgb_raw_bgr.jpg
 raw_action.npy
+```
+
+`initial_pose_check` compares the current G1 hand-in-camera pose with
+fine-tuning data starts:
+
+```text
+episode_start_close: close to task-start demonstrations
+segment_start_close: close to training-window starts
 ```
